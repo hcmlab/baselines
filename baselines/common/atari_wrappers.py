@@ -78,6 +78,7 @@ class EpisodicLifeEnv(gym.Wrapper):
             # so it's important to keep lives > 0, so that we only reset once
             # the environment advertises done.
             done = True
+            reward = -100
         self.lives = lives
         return obs, reward, done, info
 
@@ -131,8 +132,16 @@ class ClipRewardEnv(gym.RewardWrapper):
         return np.sign(reward)
 
 
+class DivideReward(gym.RewardWrapper):
+    def __init__(self, env):
+        gym.RewardWrapper.__init__(self, env)
+
+    def reward(self, reward):
+        return reward / 10.
+
+
 class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=84, height=84, grayscale=True, dict_space_key=None):
+    def __init__(self, env, width=84, height=84, grayscale=True, dict_space_key=None, cut_frame=False):
         """
         Warp frames to 84x84 as done in the Nature paper and later work.
 
@@ -144,6 +153,7 @@ class WarpFrame(gym.ObservationWrapper):
         self._height = height
         self._grayscale = grayscale
         self._key = dict_space_key
+        self._cut_frame = cut_frame
         if self._grayscale:
             num_colors = 1
         else:
@@ -168,6 +178,9 @@ class WarpFrame(gym.ObservationWrapper):
             frame = obs
         else:
             frame = obs[self._key]
+
+        if self._cut_frame:
+            frame = frame[1:172, :, :]
 
         if self._grayscale:
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
@@ -272,18 +285,19 @@ def make_atari(env_id, max_episode_steps=None):
         env = TimeLimit(env, max_episode_steps=max_episode_steps)
     return env
 
-def wrap_deepmind(env, episode_life=True, clip_rewards=True, frame_stack=False, scale=False):
+def wrap_deepmind(env, episode_life=True, clip_rewards=False, frame_stack=True, scale=False, grayscale=True, cut_frame=False):
     """Configure environment for DeepMind-style Atari.
     """
     if episode_life:
         env = EpisodicLifeEnv(env)
     if 'FIRE' in env.unwrapped.get_action_meanings():
         env = FireResetEnv(env)
-    env = WarpFrame(env)
+    env = WarpFrame(env, grayscale=grayscale, cut_frame=cut_frame)
     if scale:
         env = ScaledFloatFrame(env)
     if clip_rewards:
         env = ClipRewardEnv(env)
+    env = DivideReward(env)
     if frame_stack:
         env = FrameStack(env, 4)
     return env

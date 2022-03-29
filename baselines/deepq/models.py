@@ -5,7 +5,8 @@ import tensorflow.contrib.layers as layers
 def build_q_func(network, hiddens=[256], dueling=True, layer_norm=False, **network_kwargs):
     if isinstance(network, str):
         from baselines.common.models import get_network_builder
-        network = get_network_builder(network)(**network_kwargs)
+        # pass empty kwargs since we need the only remaining kwarg 'model_index' only later in this script
+        network = get_network_builder(network)(**{})
 
     def q_func_builder(input_placeholder, num_actions, scope, reuse=False):
         with tf.variable_scope(scope, reuse=reuse):
@@ -17,7 +18,7 @@ def build_q_func(network, hiddens=[256], dueling=True, layer_norm=False, **netwo
 
             latent = layers.flatten(latent)
 
-            with tf.variable_scope("action_value"):
+            with tf.variable_scope("action_value" + str(network_kwargs['model_index'])):
                 action_out = latent
                 for hidden in hiddens:
                     action_out = layers.fully_connected(action_out, num_outputs=hidden, activation_fn=None)
@@ -27,7 +28,7 @@ def build_q_func(network, hiddens=[256], dueling=True, layer_norm=False, **netwo
                 action_scores = layers.fully_connected(action_out, num_outputs=num_actions, activation_fn=None)
 
             if dueling:
-                with tf.variable_scope("state_value"):
+                with tf.variable_scope("state_value" + str(network_kwargs['model_index'])):
                     state_out = latent
                     for hidden in hiddens:
                         state_out = layers.fully_connected(state_out, num_outputs=hidden, activation_fn=None)

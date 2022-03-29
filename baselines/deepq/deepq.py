@@ -1,5 +1,6 @@
 import os
 import tempfile
+from collections import namedtuple
 
 import tensorflow as tf
 import zipfile
@@ -18,6 +19,8 @@ from baselines.deepq.utils import ObservationInput
 
 from baselines.common.tf_util import get_session
 from baselines.deepq.models import build_q_func
+
+from baselines.head_settings import HEADS
 
 
 class ActWrapper(object):
@@ -73,6 +76,28 @@ class ActWrapper(object):
 
     def save(self, path):
         save_variables(path)
+
+
+class FakeActWrapper(object):
+    def __init__(self, act_wrappers):
+        self.act_wrappers = act_wrappers
+
+    def step(self, obs, **kwargs):
+        # DQN doesn't use RNNs so we ignore states and masks
+        kwargs.pop('S', None)
+        kwargs.pop('M', None)
+
+        actions = [act(np.array(obs)[None], update_eps=0., **kwargs)[0] for act in self.act_wrappers]
+
+        #  print(f"{min(actions)}, {max(actions)} | {min(actions2)}, {max(actions2)} | {min(actions3)}, {max(actions3)} | {min(actions4)}, {max(actions4)}")
+
+        mean_actions = np.mean(np.array(actions), axis=0)
+
+        return np.argmax(mean_actions), None, None, None
+
+    def save(self, path):
+        self.act_wrappers[0].save(path)
+        # save_variables(path)
 
 
 def load_act(path):
@@ -189,7 +214,15 @@ def learn(env,
     sess = get_session()
     set_global_seeds(seed)
 
-    q_func = build_q_func(network, **network_kwargs)
+    q_funcs = []
+
+    network_kwargs_for_heads = []
+    for index, HEAD in enumerate(HEADS):
+        network_kwargs_for_head = dict(network_kwargs)
+        network_kwargs_for_head['model_index'] = index
+        network_kwargs_for_heads.append(network_kwargs_for_head)
+        q_func_for_head = build_q_func(network, **network_kwargs_for_head)
+        q_funcs.append(q_func_for_head)
 
     # capture the shape outside the closure so that the env object is not serialized
     # by cloudpickle when serializing make_obs_ph
@@ -198,34 +231,43 @@ def learn(env,
     def make_obs_ph(name):
         return ObservationInput(observation_space, name=name)
 
-    act, train, update_target, debug = deepq.build_train(
-        make_obs_ph=make_obs_ph,
-        q_func=q_func,
-        num_actions=env.action_space.n,
-        optimizer=tf.train.AdamOptimizer(learning_rate=lr),
-        gamma=gamma,
-        grad_norm_clipping=10,
-        param_noise=param_noise
-    )
+    Experience = namedtuple("Experience", "obses_t actions rewards obses_tp1 dones weights batch_idxes")
+    HeadFunc = namedtuple("HeadFunc", "act train update_target debug")
+    head_funcs = []
+    for index, HEAD in enumerate(HEADS):
+        act, train, update_target, debug = deepq.build_train(
+            make_obs_ph=make_obs_ph,
+            q_func=q_funcs[index],
+            num_actions=env.action_space.n,
+            optimizer=tf.train.AdamOptimizer(learning_rate=0.0001),
+            gamma=gamma,
+            grad_norm_clipping=10,
+            param_noise=param_noise,
+            **network_kwargs_for_heads[index]
+        )
+        head_func = HeadFunc(act, train, update_target, debug)
+        head_funcs.append(head_func)
 
-    act_params = {
-        'make_obs_ph': make_obs_ph,
-        'q_func': q_func,
-        'num_actions': env.action_space.n,
-    }
+    act_wrappers = []
+    for index, HEAD in enumerate(HEADS):
+        act_params_for_head = {
+            'make_obs_ph': make_obs_ph,
+            'q_func': q_funcs[index],
+            'num_actions': env.action_space.n,
+            'reuse': tf.AUTO_REUSE,
+        }
+        act_wrappers.append(ActWrapper(head_funcs[index].act, act_params_for_head))
 
-    act = ActWrapper(act, act_params)
-
-    # Create the replay buffer
+    replay_buffers = []
     if prioritized_replay:
-        replay_buffer = PrioritizedReplayBuffer(buffer_size, alpha=prioritized_replay_alpha)
+        replay_buffers = [PrioritizedReplayBuffer(buffer_size, alpha=prioritized_replay_alpha) for _ in HEADS]
         if prioritized_replay_beta_iters is None:
             prioritized_replay_beta_iters = total_timesteps
         beta_schedule = LinearSchedule(prioritized_replay_beta_iters,
                                        initial_p=prioritized_replay_beta0,
                                        final_p=1.0)
     else:
-        replay_buffer = ReplayBuffer(buffer_size)
+        replay_buffers = [ReplayBuffer(buffer_size) for _ in HEADS]
         beta_schedule = None
     # Create the schedule for exploration starting from 1.
     exploration = LinearSchedule(schedule_timesteps=int(exploration_fraction * total_timesteps),
@@ -234,7 +276,8 @@ def learn(env,
 
     # Initialize the parameters and copy them to the target network.
     U.initialize()
-    update_target()
+    for head_func in head_funcs:
+        head_func.update_target()
 
     episode_rewards = [0.0]
     saved_mean_reward = None
@@ -275,12 +318,17 @@ def learn(env,
                 kwargs['reset'] = reset
                 kwargs['update_param_noise_threshold'] = update_param_noise_threshold
                 kwargs['update_param_noise_scale'] = True
-            action = act(np.array(obs)[None], update_eps=update_eps, **kwargs)[0]
+
+            actions = [act(np.array(obs)[None], update_eps=update_eps, **kwargs)[0] for act in act_wrappers]
+            # Calculate mean of actions and get max index
+            mean_actions = np.mean(np.array(actions), axis=0)
+            action = np.argmax(mean_actions)
             env_action = action
             reset = False
             new_obs, rew, done, _ = env.step(env_action)
             # Store transition in the replay buffer.
-            replay_buffer.add(obs, action, rew, new_obs, float(done))
+            for index, replay_buffer in enumerate(replay_buffers):
+                replay_buffer.add(obs, action, get_split_reward(rew, index), new_obs, float(done))
             obs = new_obs
 
             episode_rewards[-1] += rew
@@ -291,20 +339,32 @@ def learn(env,
 
             if t > learning_starts and t % train_freq == 0:
                 # Minimize the error in Bellman's equation on a batch sampled from replay buffer.
+                experiences = []
                 if prioritized_replay:
-                    experience = replay_buffer.sample(batch_size, beta=beta_schedule.value(t))
-                    (obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes) = experience
+                    for index, replay_buffer in enumerate(replay_buffers):
+                        experience = replay_buffer.sample(batch_size, beta=beta_schedule.value(t))
+                        (obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes) = experience
+                        experiences.append(
+                            Experience(obses_t, actions, rewards, obses_tp1, dones, weights, batch_idxes))
                 else:
-                    obses_t, actions, rewards, obses_tp1, dones = replay_buffer.sample(batch_size)
-                    weights, batch_idxes = np.ones_like(rewards), None
-                td_errors = train(obses_t, actions, rewards, obses_tp1, dones, weights)
+                    for index, replay_buffer in enumerate(replay_buffers):
+                        obses_t, actions, rewards, obses_tp1, dones = replay_buffer.sample(batch_size)
+                        experiences.append(
+                            Experience(obses_t, actions, rewards, obses_tp1, dones, np.ones_like(rewards), None))
+
+                td_errors = [
+                    head_func.train(experiences[index].obses_t, experiences[index].actions, experiences[index].rewards,
+                                    experiences[index].obses_tp1, experiences[index].dones, experiences[index].weights)
+                    for index, head_func in enumerate(head_funcs)]
                 if prioritized_replay:
-                    new_priorities = np.abs(td_errors) + prioritized_replay_eps
-                    replay_buffer.update_priorities(batch_idxes, new_priorities)
+                    new_priorities = [np.abs(td_error) + prioritized_replay_eps for td_error in td_errors]
+                    for index, replay_buffer in enumerate(replay_buffers):
+                        replay_buffer.update_priorities(experiences[index].batch_idxes, new_priorities[index])
 
             if t > learning_starts and t % target_network_update_freq == 0:
                 # Update target network periodically.
-                update_target()
+                for head_func in head_funcs:
+                    head_func.update_target()
 
             mean_100ep_reward = round(np.mean(episode_rewards[-101:-1]), 1)
             num_episodes = len(episode_rewards)
@@ -320,7 +380,7 @@ def learn(env,
                 if saved_mean_reward is None or mean_100ep_reward > saved_mean_reward:
                     if print_freq is not None:
                         logger.log("Saving model due to mean reward increase: {} -> {}".format(
-                                   saved_mean_reward, mean_100ep_reward))
+                            saved_mean_reward, mean_100ep_reward))
                     save_variables(model_file)
                     model_saved = True
                     saved_mean_reward = mean_100ep_reward
@@ -329,4 +389,17 @@ def learn(env,
                 logger.log("Restored model with mean reward: {}".format(saved_mean_reward))
             load_variables(model_file)
 
-    return act
+    return FakeActWrapper(act_wrappers)
+
+
+def get_split_reward(rew, head_index):
+    # Here we create a tensor that puts the reward for head one on first place in an array, the reward for head two in second place and so on
+    # the rewards are already divided by 10 at this point
+    rewards_for_model = HEADS[head_index]
+
+    if isinstance(rew, float):
+        return rew if rew in rewards_for_model else 0.0
+
+
+    rewards = np.where(rew in rewards_for_model, rew, 0)
+    return rewards

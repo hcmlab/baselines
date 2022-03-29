@@ -95,6 +95,7 @@ The functions in this file can are used to create the following functions:
 """
 import tensorflow as tf
 import baselines.common.tf_util as U
+from baselines.head_settings import HEADS
 
 
 def scope_vars(scope, trainable_only=False):
@@ -181,14 +182,16 @@ def build_act(make_obs_ph, q_func, num_actions, scope="deepq", reuse=None):
         eps = tf.get_variable("eps", (), initializer=tf.constant_initializer(0))
 
         q_values = q_func(observations_ph.get(), num_actions, scope="q_func")
-        deterministic_actions = tf.argmax(q_values, axis=1)
+        # We do not chose the action here, but later when combining the different heads
+        # deterministic_actions = tf.argmax(q_values, axis=1)
 
         batch_size = tf.shape(observations_ph.get())[0]
-        random_actions = tf.random_uniform(tf.stack([batch_size]), minval=0, maxval=num_actions, dtype=tf.int64)
+        # if random, return random qValues in the same value range as the original qValues
+        random_actions = tf.random_uniform(tf.stack([batch_size, num_actions]), minval=tf.reduce_min(q_values), maxval=tf.reduce_max(q_values), dtype=tf.float32)
         chose_random = tf.random_uniform(tf.stack([batch_size]), minval=0, maxval=1, dtype=tf.float32) < eps
-        stochastic_actions = tf.where(chose_random, random_actions, deterministic_actions)
+        stochastic_actions = tf.where(chose_random, random_actions, q_values)
 
-        output_actions = tf.cond(stochastic_ph, lambda: stochastic_actions, lambda: deterministic_actions)
+        output_actions = tf.cond(stochastic_ph, lambda: stochastic_actions, lambda: q_values)
         update_eps_expr = eps.assign(tf.cond(update_eps_ph >= 0, lambda: update_eps_ph, lambda: eps))
         _act = U.function(inputs=[observations_ph, stochastic_ph, update_eps_ph],
                          outputs=output_actions,
@@ -313,9 +316,8 @@ def build_act_with_param_noise(make_obs_ph, q_func, num_actions, scope="deepq", 
             return _act(ob, stochastic, update_eps, reset, update_param_noise_threshold, update_param_noise_scale)
         return act
 
-
 def build_train(make_obs_ph, q_func, num_actions, optimizer, grad_norm_clipping=None, gamma=1.0,
-    double_q=True, scope="deepq", reuse=None, param_noise=False, param_noise_filter_func=None):
+    double_q=True, scope="deepq", reuse=None, param_noise=False, param_noise_filter_func=None, **kwargs):
     """Creates the train function:
 
     Parameters
@@ -369,6 +371,8 @@ def build_train(make_obs_ph, q_func, num_actions, optimizer, grad_norm_clipping=
     debug: {str: function}
         a bunch of functions to print debug data like q_values.
     """
+    reuse = tf.AUTO_REUSE
+
     if param_noise:
         act_f = build_act_with_param_noise(make_obs_ph, q_func, num_actions, scope=scope, reuse=reuse,
             param_noise_filter_func=param_noise_filter_func)
@@ -386,11 +390,11 @@ def build_train(make_obs_ph, q_func, num_actions, optimizer, grad_norm_clipping=
 
         # q network evaluation
         q_t = q_func(obs_t_input.get(), num_actions, scope="q_func", reuse=True)  # reuse parameters from act
-        q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=tf.get_variable_scope().name + "/q_func")
+        q_func_vars = get_q_func_vars(model_index=kwargs['model_index'], target=False)
 
         # target q network evalution
         q_tp1 = q_func(obs_tp1_input.get(), num_actions, scope="target_q_func")
-        target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=tf.get_variable_scope().name + "/target_q_func")
+        target_q_func_vars = get_q_func_vars(model_index=kwargs['model_index'], target=True)
 
         # q scores for actions which we know were selected in the given state.
         q_t_selected = tf.reduce_sum(q_t * tf.one_hot(act_t_ph, num_actions), 1)
@@ -404,8 +408,10 @@ def build_train(make_obs_ph, q_func, num_actions, optimizer, grad_norm_clipping=
             q_tp1_best = tf.reduce_max(q_tp1, 1)
         q_tp1_best_masked = (1.0 - done_mask_ph) * q_tp1_best
 
+        rew_for_model = get_split_reward(rew_t_ph=rew_t_ph, head_index=kwargs['model_index'])
+
         # compute RHS of bellman equation
-        q_t_selected_target = rew_t_ph + gamma * q_tp1_best_masked
+        q_t_selected_target = rew_for_model + gamma * q_tp1_best_masked
 
         # compute the error (potentially clipped)
         td_error = q_t_selected - tf.stop_gradient(q_t_selected_target)
@@ -447,3 +453,48 @@ def build_train(make_obs_ph, q_func, num_actions, optimizer, grad_norm_clipping=
         q_values = U.function([obs_t_input], q_t)
 
         return act_f, train, update_target, {'q_values': q_values}
+
+
+def get_split_reward(rew_t_ph, head_index):
+    # Here we create a tensor that puts the reward for head one on first place in an array, the reward for head two in second place and so on
+    # the reward is already divided by 10 here
+    rewards_for_model = HEADS[head_index]
+    zeros = tf.zeros(shape=tf.shape(rew_t_ph))
+    filled_start_reward = tf.cast(tf.fill(dims=tf.shape(rew_t_ph), value=rewards_for_model[0]), tf.float32)
+    filled_stop_reward = tf.cast(tf.fill(dims=tf.shape(rew_t_ph), value=rewards_for_model[1]), tf.float32)
+    head_reward = tf.where(
+        tf.math.logical_and(tf.math.greater_equal(rew_t_ph, filled_start_reward), tf.math.less(rew_t_ph, filled_stop_reward)),
+        rew_t_ph, zeros)
+    return head_reward
+
+
+def get_q_func_vars(model_index, target=False):
+    path = "target_q_func" if target else "q_func"
+
+    q_func_vars_conv = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,
+                                         scope=tf.get_variable_scope().name + "/" + path + "/convnet")
+    q_func_vars_head_action = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,
+                                         scope=tf.get_variable_scope().name + "/" + path + "/action_value" + str(model_index))
+    q_func_vars_head_state = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,
+                                         scope=tf.get_variable_scope().name + "/" + path + "/state_value" + str(model_index))
+    q_func_vars = q_func_vars_conv + q_func_vars_head_action + q_func_vars_head_state
+    return q_func_vars
+
+
+def get_q_func_vars_all(target=False):
+    path = "target_q_func" if target else "q_func"
+
+    q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,
+                                         scope=tf.get_variable_scope().name + "/" + path + "/convnet")
+
+    for i in range(len(HEADS)):
+        q_func_vars_head_action = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,
+                                             scope=tf.get_variable_scope().name + "/" + path + "/action_value" + str(i))
+        q_func_vars_head_state = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,
+                                             scope=tf.get_variable_scope().name + "/" + path + "/state_value" + str(i))
+
+        q_func_vars = q_func_vars_head_action + q_func_vars_head_state
+
+    return q_func_vars
+
+

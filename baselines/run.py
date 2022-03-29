@@ -222,7 +222,7 @@ def main(args):
     if args.play:
         logger.log("Running trained model")
         obs = env.reset()
-
+        match_cnt = 1
         state = model.initial_state if hasattr(model, 'initial_state') else None
         dones = np.zeros((1,))
 
@@ -238,13 +238,19 @@ def main(args):
             env.render()
             done_any = done.any() if isinstance(done, np.ndarray) else done
             if done_any:
-                for i in np.nonzero(done)[0]:
-                    print('episode_rew={}'.format(episode_rew[i]))
-                    episode_rew[i] = 0
+                if match_cnt % 3 == 0:
+                    for i in np.nonzero(done)[0]:
+                        print('episode_rew={}'.format(episode_rew[i]))
+                        episode_rew[i] = 0
+
+                match_cnt += 1
+
+                obs = env.reset()
 
     env.close()
 
     return model
+
 
 if __name__ == '__main__':
     main(sys.argv)
