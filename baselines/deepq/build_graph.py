@@ -408,10 +408,8 @@ def build_train(make_obs_ph, q_func, num_actions, optimizer, grad_norm_clipping=
             q_tp1_best = tf.reduce_max(q_tp1, 1)
         q_tp1_best_masked = (1.0 - done_mask_ph) * q_tp1_best
 
-        rew_for_model = get_split_reward(rew_t_ph=rew_t_ph, head_index=kwargs['model_index'])
-
         # compute RHS of bellman equation
-        q_t_selected_target = rew_for_model + gamma * q_tp1_best_masked
+        q_t_selected_target = rew_t_ph + gamma * q_tp1_best_masked
 
         # compute the error (potentially clipped)
         td_error = q_t_selected - tf.stop_gradient(q_t_selected_target)
@@ -453,19 +451,6 @@ def build_train(make_obs_ph, q_func, num_actions, optimizer, grad_norm_clipping=
         q_values = U.function([obs_t_input], q_t)
 
         return act_f, train, update_target, {'q_values': q_values}
-
-
-def get_split_reward(rew_t_ph, head_index):
-    # Here we create a tensor that puts the reward for head one on first place in an array, the reward for head two in second place and so on
-    # the reward is already divided by 10 here
-    rewards_for_model = HEADS[head_index]
-    zeros = tf.zeros(shape=tf.shape(rew_t_ph))
-    filled_start_reward = tf.cast(tf.fill(dims=tf.shape(rew_t_ph), value=rewards_for_model[0]), tf.float32)
-    filled_stop_reward = tf.cast(tf.fill(dims=tf.shape(rew_t_ph), value=rewards_for_model[1]), tf.float32)
-    head_reward = tf.where(
-        tf.math.logical_and(tf.math.greater_equal(rew_t_ph, filled_start_reward), tf.math.less(rew_t_ph, filled_stop_reward)),
-        rew_t_ph, zeros)
-    return head_reward
 
 
 def get_q_func_vars(model_index, target=False):

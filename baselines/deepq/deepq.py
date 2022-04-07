@@ -398,7 +398,7 @@ def get_split_reward(rew, head_index):
     rewards_for_model = HEADS[head_index]
 
     if isinstance(rew, float):
-        return rew if rew in rewards_for_model else 0.0
+        return rew if (rewards_for_model[0] <= rew < rewards_for_model[1]) else 0.0
 
 
     rewards = np.where(rew in rewards_for_model, rew, 0)
