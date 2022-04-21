@@ -398,7 +398,9 @@ def get_split_reward(rew, head_index):
     rewards_for_model = HEADS[head_index]
 
     if isinstance(rew, float):
-        return rew if (rewards_for_model[0] <= rew < rewards_for_model[1]) else 0.0
+        # rewards_for_model[2] is the weight given to this reward type
+        weighted_rew = rew * rewards_for_model[2] if (rewards_for_model[0] <= rew < rewards_for_model[1]) else 0.0
+        return weighted_rew
 
 
     rewards = np.where(rew in rewards_for_model, rew, 0)
