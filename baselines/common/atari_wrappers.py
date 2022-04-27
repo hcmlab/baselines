@@ -8,6 +8,13 @@ import cv2
 cv2.ocl.setUseOpenCL(False)
 from .wrappers import TimeLimit
 
+# Params for special training configs (quick hack)
+INGAME_REWARD = False
+POWER_PILL = True
+CROP_BOTTOM = True
+FIVE_ACTIONS = True
+PENALIZE_DEATH = True
+
 
 class NoopResetEnv(gym.Wrapper):
     def __init__(self, env, noop_max=30):
@@ -38,6 +45,7 @@ class NoopResetEnv(gym.Wrapper):
     def step(self, ac):
         return self.env.step(ac)
 
+
 class FireResetEnv(gym.Wrapper):
     def __init__(self, env):
         """Take action on reset for environments that are fixed until firing."""
@@ -57,6 +65,7 @@ class FireResetEnv(gym.Wrapper):
 
     def step(self, ac):
         return self.env.step(ac)
+
 
 class EpisodicLifeEnv(gym.Wrapper):
     def __init__(self, env):
@@ -78,6 +87,8 @@ class EpisodicLifeEnv(gym.Wrapper):
             # so it's important to keep lives > 0, so that we only reset once
             # the environment advertises done.
             done = True
+            if PENALIZE_DEATH:
+                reward = -100
         self.lives = lives
         return obs, reward, done, info
 
@@ -127,9 +138,20 @@ class ClipRewardEnv(gym.RewardWrapper):
         gym.RewardWrapper.__init__(self, env)
 
     def reward(self, reward):
-        """Bin reward to {+1, 0, -1} by its sign."""
-        return np.sign(reward)
-
+        if INGAME_REWARD:
+            # return the ingame reward but scale it down a little
+            out = reward/10
+        elif POWER_PILL:
+            # cut the reward, such that it only is non-zero if pacman ate a ghost (msPacman specific)
+            if reward < 50:
+                reward = 0
+            if reward > 99:
+                reward = 0
+            out = reward/10
+        else:
+            # Bin reward to {+1, 0, -1} by its sign.
+            out = np.sign(reward)
+        return out
 
 class WarpFrame(gym.ObservationWrapper):
     def __init__(self, env, width=84, height=84, grayscale=True, dict_space_key=None):
@@ -168,6 +190,10 @@ class WarpFrame(gym.ObservationWrapper):
             frame = obs
         else:
             frame = obs[self._key]
+
+        if CROP_BOTTOM:
+            # cut bottom of the frame which contains remaining lives and score
+            frame = frame[0:173, :, :]
 
         if self._grayscale:
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
@@ -286,5 +312,10 @@ def wrap_deepmind(env, episode_life=True, clip_rewards=True, frame_stack=False, 
         env = ClipRewardEnv(env)
     if frame_stack:
         env = FrameStack(env, 4)
+
+    if FIVE_ACTIONS:
+        # cut ambiguous actions (e.g. down-left) from pacman
+        env.action_space = gym.spaces.Discrete(5)
+
     return env
 
