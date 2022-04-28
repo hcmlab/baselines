@@ -17,6 +17,9 @@ from baselines.a2c.utils import get_by_index, check_shape, avg_norm, gradient_ad
 from baselines.acer.buffer import Buffer
 from baselines.acer.runner import Runner
 
+# Dirty fix for intermediate checkpoints
+CHECKPOINT_PATH = "./Checkpoints\\"
+
 # remove last step
 def strip(var, nenvs, nsteps, flat = False):
     vars = batch_to_seq(var, nenvs, nsteps + 1, flat)
@@ -270,6 +273,12 @@ class Acer():
             for name, val in zip(names_ops, values_ops):
                 logger.record_tabular(name, float(val))
             logger.dump_tabular()
+
+            # added saving of intermediate checkpoints
+            save_path = CHECKPOINT_PATH + "checkpoint_steps_" + str(
+                steps) + "_mean_rew_" + str(int(self.episode_stats.mean_reward())) + "_mean_legnth_" + str(
+                int(self.episode_stats.mean_length()))
+            model.save(save_path)
 
 
 def learn(network, env, seed=None, nsteps=20, total_timesteps=int(80e6), q_coef=0.5, ent_coef=0.01,

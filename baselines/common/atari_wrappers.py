@@ -10,10 +10,12 @@ from .wrappers import TimeLimit
 
 # Params for special training configs (quick hack)
 INGAME_REWARD = False
-POWER_PILL = True
+POWER_PILL = False
 CROP_BOTTOM = True
 FIVE_ACTIONS = True
 PENALIZE_DEATH = True
+# the version of fear ghost. 0 means no special reward for fearing ghosts.
+FEAR_GHOST_VERSION = 2
 
 
 class NoopResetEnv(gym.Wrapper):
@@ -148,6 +150,8 @@ class ClipRewardEnv(gym.RewardWrapper):
             if reward > 99:
                 reward = 0
             out = reward/10
+        elif FEAR_GHOST_VERSION > 0:
+            out = fearGhostReward(reward, FEAR_GHOST_VERSION)
         else:
             # Bin reward to {+1, 0, -1} by its sign.
             out = np.sign(reward)
@@ -251,6 +255,27 @@ class ScaledFloatFrame(gym.ObservationWrapper):
         # careful! This undoes the memory optimization, use
         # with smaller replay buffers only.
         return np.array(observation).astype(np.float32) / 255.0
+
+
+def fearGhostReward(reward, version):
+    if version == 1:
+        if reward > 10:
+            reward = 10;
+    elif version == 2:
+        if reward > -1:
+            reward = 10;
+    elif version == 3:
+        if reward > -1:
+            reward = 1;
+    elif version == 4:
+        if reward > 0:
+            reward = 1;
+    else:
+        reward = reward
+
+    return reward/10
+
+
 
 class LazyFrames(object):
     def __init__(self, frames):
