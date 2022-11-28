@@ -9,13 +9,15 @@ cv2.ocl.setUseOpenCL(False)
 from .wrappers import TimeLimit
 
 # Params for special training configs (quick hack)
-INGAME_REWARD = False
+INGAME_REWARD = True
 POWER_PILL = False
 CROP_BOTTOM = True
 FIVE_ACTIONS = True
-PENALIZE_DEATH = True
+PENALIZE_DEATH = False
 # the version of fear ghost. 0 means no special reward for fearing ghosts.
-FEAR_GHOST_VERSION = 2
+FEAR_GHOST_VERSION = 0
+
+NO_STACKING = True
 
 
 class NoopResetEnv(gym.Wrapper):
@@ -314,6 +316,7 @@ class LazyFrames(object):
     def frame(self, i):
         return self._force()[..., i]
 
+
 def make_atari(env_id, max_episode_steps=None):
     env = gym.make(env_id)
     assert 'NoFrameskip' in env.spec.id
@@ -323,9 +326,14 @@ def make_atari(env_id, max_episode_steps=None):
         env = TimeLimit(env, max_episode_steps=max_episode_steps)
     return env
 
+
 def wrap_deepmind(env, episode_life=True, clip_rewards=True, frame_stack=False, scale=False):
     """Configure environment for DeepMind-style Atari.
     """
+    #ugly hack to use my own flags
+    if NO_STACKING:
+        frame_stack = False
+
     if episode_life:
         env = EpisodicLifeEnv(env)
     if 'FIRE' in env.unwrapped.get_action_meanings():
